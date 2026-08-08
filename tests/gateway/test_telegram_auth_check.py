@@ -235,6 +235,25 @@ def test_is_user_authorized_from_message_wildcard():
     assert adapter._is_user_authorized_from_message(msg) is True
 
 
+def test_profile_bound_authorization_check_overrides_process_global_allowlist(monkeypatch):
+    """A multiplexed adapter must authorize against its own profile, not global env."""
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "default-user")
+    adapter = _make_adapter()
+    adapter.set_authorization_check(
+        lambda user_id, chat_type=None, chat_id=None: user_id == "profile-user"
+    )
+
+    profile_msg = _make_message(
+        from_user_id="profile-user", chat_id="profile-user", chat_type="private"
+    )
+    default_msg = _make_message(
+        from_user_id="default-user", chat_id="default-user", chat_type="private"
+    )
+
+    assert adapter._is_user_authorized_from_message(profile_msg) is True
+    assert adapter._is_user_authorized_from_message(default_msg) is False
+
+
 def test_is_user_authorized_from_message_no_from_user():
     """_is_user_authorized_from_message should return True for messages without from_user."""
     adapter = _make_adapter(allow_from=["111"])
