@@ -2967,6 +2967,27 @@ class BasePlatformAdapter(ABC):
         """
         self._message_handler = handler
 
+    def set_profile_name(self, profile_name: Optional[str]) -> None:
+        """Stamp inbound events before adapter-level session keying.
+
+        Secondary adapters in a multiplexed gateway belong to one fixed
+        profile.  The profile must be present before ``handle_message`` builds
+        its active-session key; stamping it only inside the runner callback is
+        too late for busy-session and pending-clarify routing.
+        """
+        self._profile_name = str(profile_name) if profile_name else None
+
+    def _apply_profile_name(self, event: MessageEvent) -> None:
+        """Apply this adapter's fixed multiplex profile to an inbound event."""
+        profile_name = getattr(self, "_profile_name", None)
+        source = getattr(event, "source", None)
+        if not profile_name or source is None or source.profile == profile_name:
+            return
+        try:
+            event.source = dataclasses.replace(source, profile=profile_name)
+        except Exception:
+            logger.debug("profile scope rewrite failed", exc_info=True)
+
     def set_topic_recovery_fn(
         self,
         fn: Optional[Callable[[Any], Optional[str]]],
@@ -4864,6 +4885,12 @@ class BasePlatformAdapter(ABC):
 
         coerce_plaintext_gateway_command(event)
 
+        # Multiplexed secondary-profile adapters must stamp the profile before
+        # any adapter-level session key is built.  Otherwise an active clarify
+        # is registered under ``agent:<profile>:...`` while this guard looks
+        # under ``agent:main:...`` and queues the user's reply until timeout.
+        self._apply_profile_name(event)
+
         # Rewrite ``event.source.thread_id`` via the installed recovery hook
         # (Telegram DM topic mode) so the session key, guard checks, and
         # downstream delivery all agree on the same lane.
@@ -4874,6 +4901,7 @@ class BasePlatformAdapter(ABC):
             event.source,
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+            profile=event.source.profile,
         )
 
         # On-entry self-heal: if the adapter still has an _active_sessions
