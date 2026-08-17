@@ -1014,6 +1014,21 @@ class TelegramAdapter(BasePlatformAdapter):
         if not user_id:
             return True
 
+        # GatewayRunner installs a profile-bound authorization callback on every
+        # live adapter. Prefer it before consulting process-global env so a
+        # multiplexed secondary Telegram bot uses its own profile allowlist.
+        # Standalone/custom adapters without a callback retain the legacy
+        # config/env fallback below.
+        profile_auth = None
+        if getattr(self, "_authorization_check", None) is not None:
+            profile_auth = self._is_sender_authorized(
+                user_id,
+                source.chat_type,
+                source.chat_id,
+            )
+        if profile_auth is not None:
+            return profile_auth
+
         # Adapter-level allow_from / group_allow_from: when set, they are the
         # sole authority.  Group chats use group_allow_from; DMs use allow_from.
         chat_type = source.chat_type or ""

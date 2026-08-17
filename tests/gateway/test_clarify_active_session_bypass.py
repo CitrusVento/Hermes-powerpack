@@ -88,6 +88,41 @@ async def test_active_session_routes_typed_choice_clarify_reply_to_runner_not_bu
 
 
 @pytest.mark.asyncio
+async def test_multiplex_profile_stamp_precedes_active_session_clarify_bypass():
+    """Secondary-profile adapters must key active sessions with their profile.
+
+    In multiplex mode the runner used to stamp ``source.profile`` only inside
+    the message handler.  BasePlatformAdapter builds its active-session key
+    before calling that handler, so it looked under ``agent:main`` while the
+    pending clarify lived under ``agent:<profile>`` and queued the reply until
+    timeout instead of resolving it.
+    """
+    _clear_clarify_state()
+    from tools import clarify_gateway as cm
+
+    adapter = _ClarifyBypassAdapter()
+    adapter.set_profile_name("lexa")
+    adapter._message_handler = AsyncMock(return_value="")
+    adapter._busy_session_handler = AsyncMock(return_value=True)
+    event = _event("the missing details")
+    session_key = build_session_key(
+        event.source,
+        group_sessions_per_user=adapter.config.extra.get("group_sessions_per_user", True),
+        thread_sessions_per_user=adapter.config.extra.get("thread_sessions_per_user", False),
+        profile="lexa",
+    )
+    adapter._active_sessions[session_key] = asyncio.Event()
+    cm.register("clarify-mux", session_key, "What is missing?", None)
+
+    await adapter.handle_message(event)
+
+    assert event.source.profile == "lexa"
+    adapter._message_handler.assert_awaited_once_with(event)
+    adapter._busy_session_handler.assert_not_awaited()
+    assert adapter._pending_messages == {}
+
+
+@pytest.mark.asyncio
 async def test_gateway_clarify_reply_resumes_typing_before_returning_empty_ack():
     """A clarify answer must re-enable the active run's typing indicator.
 
