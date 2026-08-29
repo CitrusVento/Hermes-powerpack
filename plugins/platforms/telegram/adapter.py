@@ -878,6 +878,7 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_type: Optional[str] = None,
         thread_id: Optional[str] = None,
         user_name: Optional[str] = None,
+        profile: Optional[str] = None,
     ) -> bool:
         """Return whether a Telegram inline-button caller may perform gated actions."""
         normalized_user_id = str(user_id or "").strip()
@@ -903,6 +904,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     user_id=normalized_user_id,
                     user_name=str(user_name).strip() if user_name else None,
                     thread_id=str(thread_id) if thread_id is not None else None,
+                    profile=str(profile).strip() if profile else None,
                 )
                 return bool(auth_fn(source))
             except Exception:
@@ -6232,6 +6234,20 @@ class TelegramAdapter(BasePlatformAdapter):
                     await query.answer(text="Invalid approval data.")
                     return
 
+                # Approval prompts can belong to a routed multiplex profile
+                # even though the callback arrives on the shared Telegram
+                # transport. Recover the profile from the trusted in-memory
+                # session key before authorization; otherwise the callback is
+                # checked against the default profile allowlist.
+                approval_session_key = self._approval_state.get(approval_id)
+                approval_profile = None
+                if approval_session_key:
+                    session_parts = approval_session_key.split(":", 2)
+                    if len(session_parts) == 3 and session_parts[0] == "agent":
+                        profile_part = session_parts[1].strip()
+                        if profile_part and profile_part not in {"main", "default"}:
+                            approval_profile = profile_part
+
                 # Only authorized users may click approval buttons.
                 caller_id = str(getattr(query.from_user, "id", ""))
                 if not self._is_callback_user_authorized(
@@ -6240,6 +6256,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     chat_type=str(query_chat_type) if query_chat_type is not None else None,
                     thread_id=str(query_thread_id) if query_thread_id is not None else None,
                     user_name=query_user_name,
+                    profile=approval_profile,
                 ):
                     await query.answer(text="⛔ You are not authorized to approve commands.")
                     return
