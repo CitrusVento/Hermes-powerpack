@@ -132,8 +132,10 @@ class _RecoveringDB:
     def __init__(self, row):
         self.row = row
         self.reopened = []
+        self.calls = []
 
-    def find_latest_gateway_session_for_peer(self, **_kwargs):
+    def find_latest_gateway_session_for_peer(self, **kwargs):
+        self.calls.append(kwargs)
         return self.row
 
     def reopen_session(self, session_id):
@@ -172,3 +174,35 @@ class TestSessionStoreUnmultiplexedRecovery:
         assert recovered.session_id == "sess-coder"
         assert recovered.session_key == "agent:main:telegram:dm:99"
         assert store._db.reopened == ["sess-coder"]
+
+    def test_flag_on_rejects_other_profile_peer_fallback(self, tmp_path):
+        row = {
+            "id": "sess-beta",
+            "started_at": 1700000000,
+            "session_key": "agent:beta:telegram:dm:99",
+        }
+        store = self._store_with_row(tmp_path, row, multiplex_profiles=True)
+        source = _src(chat_id="99", chat_type="dm", profile="alpha")
+
+        recovered = store._recover_session_from_db(
+            session_key="agent:alpha:telegram:dm:99",
+            source=source,
+            now=datetime.fromtimestamp(1700000001),
+        )
+
+        assert recovered is None
+        assert store._db.reopened == []
+
+    def test_flag_on_disables_profile_ambiguous_peer_fallback(self, tmp_path):
+        store = self._store_with_row(tmp_path, None, multiplex_profiles=True)
+        source = _src(chat_id="99", chat_type="dm", user_id="99", profile="alpha")
+
+        recovered = store._recover_session_from_db(
+            session_key="agent:alpha:telegram:dm:99",
+            source=source,
+            now=datetime.fromtimestamp(1700000001),
+        )
+
+        assert recovered is None
+        assert store._db.calls[0]["chat_id"] is None
+        assert store._db.calls[0]["chat_type"] is None

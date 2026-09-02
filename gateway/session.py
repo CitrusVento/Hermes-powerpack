@@ -1993,11 +1993,17 @@ class SessionStore:
         requested_session_key: str,
         recovered: Dict[str, Any],
     ) -> bool:
-        """Prevent non-multiplexed gateways from reviving another profile's row."""
-        if getattr(self.config, "multiplex_profiles", False):
-            return True
-
+        """Prevent DB recovery from reviving another profile's session row."""
         recovered_key = str(recovered.get("session_key") or "")
+        if getattr(self.config, "multiplex_profiles", False):
+            requested_profile = self._profile_from_session_key(requested_session_key)
+            recovered_profile = self._profile_from_session_key(recovered_key)
+            return (
+                requested_profile is not None
+                and recovered_profile is not None
+                and recovered_profile == requested_profile
+            )
+
         if not recovered_key or recovered_key == requested_session_key:
             return True
 
@@ -2182,10 +2188,17 @@ class SessionStore:
         resurrected as freshly active.
         """
         legacy_key = self._legacy_slack_session_key(source)
+        # A platform/chat/user tuple cannot distinguish two profile-owned bot
+        # adapters. In multiplex mode recover only by the exact profile-aware
+        # session key; otherwise one profile can adopt another's transcript.
+        allow_peer_fallback = (
+            legacy_key is None
+            and not getattr(self.config, "multiplex_profiles", False)
+        )
         recovered = self._find_gateway_session_row(
             session_key=session_key,
             source=source,
-            allow_peer_fallback=legacy_key is None,
+            allow_peer_fallback=allow_peer_fallback,
             raise_on_lookup_error=raise_on_lookup_error,
         )
         migrated_legacy = False
