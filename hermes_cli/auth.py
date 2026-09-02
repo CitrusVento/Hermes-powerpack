@@ -1231,6 +1231,68 @@ def _auth_lock_path() -> Path:
     return _auth_file_path().with_suffix(".lock")
 
 
+def _select_auth_store_owner_ids(
+    existing_stat: Any,
+    parent_stat: Any,
+) -> Optional[Tuple[int, int]]:
+    """Choose the POSIX owner to preserve across a root-owned atomic write."""
+    if existing_stat is not None and getattr(existing_stat, "st_uid", 0) != 0:
+        return int(existing_stat.st_uid), int(existing_stat.st_gid)
+    if parent_stat is not None and getattr(parent_stat, "st_uid", 0) != 0:
+        return int(parent_stat.st_uid), int(parent_stat.st_gid)
+    if existing_stat is not None:
+        return int(existing_stat.st_uid), int(existing_stat.st_gid)
+    if parent_stat is not None:
+        return int(parent_stat.st_uid), int(parent_stat.st_gid)
+    return None
+
+
+def _auth_store_owner_ids_for_root_write(path: Path) -> Optional[Tuple[int, int]]:
+    """Return the owner a root write must preserve, or None off POSIX/root."""
+    if os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return None
+
+    existing_stat = None
+    try:
+        # Do not follow an attacker-controlled final symlink when choosing the
+        # owner. atomic_replace() will replace that directory entry itself.
+        if not path.is_symlink():
+            existing_stat = path.stat()
+    except OSError:
+        pass
+
+    parent_stat = None
+    try:
+        parent_stat = path.parent.stat()
+    except OSError:
+        pass
+    return _select_auth_store_owner_ids(existing_stat, parent_stat)
+
+
+def _apply_auth_store_owner(path: Path, owner_ids: Optional[Tuple[int, int]]) -> None:
+    """Best-effort ownership preservation for a root-created auth-store file."""
+    if owner_ids is None or os.name != "posix" or not hasattr(os, "chown"):
+        return
+    try:
+        os.chown(path, owner_ids[0], owner_ids[1], follow_symlinks=False)
+    except (OSError, NotImplementedError):
+        pass
+
+
+def _repair_auth_lock_owner_for_root(lock_path: Path) -> None:
+    """Create/repair a lock file without leaving it unreadable to its owner."""
+    owner_ids = _auth_store_owner_ids_for_root_write(lock_path)
+    if owner_ids is None:
+        return
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.touch(mode=stat.S_IRUSR | stat.S_IWUSR, exist_ok=True)
+        _apply_auth_store_owner(lock_path, owner_ids)
+        lock_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+
+
 _auth_target_lock_holders: Dict[str, threading.local] = {}
 _auth_target_lock_holders_guard = threading.Lock()
 
@@ -1356,6 +1418,7 @@ def _auth_store_lock(
     """
     auth_path = target_path if target_path is not None else _auth_file_path()
     lock_path = auth_path.with_suffix(".lock") if target_path is not None else _auth_lock_path()
+    _repair_auth_lock_owner_for_root(lock_path)
     with _file_lock(
         lock_path,
         _auth_lock_holder_for(auth_path),
@@ -1447,6 +1510,7 @@ def _save_auth_store(auth_store: Dict[str, Any], target_path: Optional[Path] = N
     # secure_parent_dir refuses to chmod /, top-level dirs, or the
     # hermes-agent install tree (#25821, #93050).
     secure_parent_dir(auth_file)
+    owner_ids = _auth_store_owner_ids_for_root_write(auth_file)
     auth_store["version"] = AUTH_STORE_VERSION
     auth_store["updated_at"] = datetime.now(timezone.utc).isoformat()
     payload = json.dumps(auth_store, indent=2) + "\n"
@@ -1465,7 +1529,9 @@ def _save_auth_store(auth_store: Dict[str, Any], target_path: Optional[Path] = N
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+        _apply_auth_store_owner(tmp_path, owner_ids)
         atomic_replace(tmp_path, auth_file)
+        _apply_auth_store_owner(auth_file, owner_ids)
         try:
             dir_fd = os.open(str(auth_file.parent), os.O_RDONLY)
         except OSError:
