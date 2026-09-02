@@ -330,3 +330,41 @@ class TestTelegramApprovalCallback:
         assert runner.last_source.platform == Platform.TELEGRAM
         assert runner.last_source.user_id == "222"
 
+    @pytest.mark.asyncio
+    async def test_multiplex_approval_authorizes_against_session_profile(self):
+        """A routed profile's approval button must use that profile's auth scope."""
+        adapter = _make_adapter()
+        adapter._approval_state[17] = "agent:alpha:telegram:dm:42424242"
+
+        class ProfileAuthRunner(_AuthRunner):
+            def _is_user_authorized(self, source):
+                self.last_source = source
+                return source.profile == "alpha" and source.user_id == "42424242"
+
+        runner = ProfileAuthRunner(authorized=True)
+        adapter._message_handler = runner._handle_message
+
+        query = AsyncMock()
+        query.data = "ea:once:17"
+        query.message = MagicMock()
+        query.message.chat_id = 42424242
+        query.message.chat.type = "private"
+        query.from_user = MagicMock()
+        query.from_user.id = 42424242
+        query.from_user.first_name = "Test User"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        update = MagicMock()
+        update.callback_query = query
+
+        with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
+            await adapter._handle_callback_query(update, MagicMock())
+
+        mock_resolve.assert_called_once_with(
+            "agent:alpha:telegram:dm:42424242", "once"
+        )
+        assert runner.last_source is not None
+        assert runner.last_source.profile == "alpha"
+        assert 17 not in adapter._approval_state
+
