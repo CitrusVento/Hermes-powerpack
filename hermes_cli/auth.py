@@ -1284,13 +1284,22 @@ def _repair_auth_lock_owner_for_root(lock_path: Path) -> None:
     owner_ids = _auth_store_owner_ids_for_root_write(lock_path)
     if owner_ids is None:
         return
+    fd = None
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path.touch(mode=stat.S_IRUSR | stat.S_IWUSR, exist_ok=True)
-        _apply_auth_store_owner(lock_path, owner_ids)
-        lock_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        flags = os.O_RDWR | os.O_CREAT
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(lock_path, flags, stat.S_IRUSR | stat.S_IWUSR)
+        os.fchown(fd, owner_ids[0], owner_ids[1])
+        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
     except OSError:
-        pass
+        # A symlink or other unsafe/unusable lock path must fail closed. The
+        # caller cannot safely serialize auth-store writes through it.
+        raise
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 _auth_target_lock_holders: Dict[str, threading.local] = {}
@@ -1365,7 +1374,16 @@ def _file_lock(
         except (OSError, PermissionError):
             pass
 
-    with lock_path.open("r+" if msvcrt else "a+", encoding="utf-8") as lock_file:
+    if fcntl:
+        flags = os.O_RDWR | os.O_CREAT | os.O_APPEND
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        lock_fd = os.open(lock_path, flags, stat.S_IRUSR | stat.S_IWUSR)
+        lock_file_context = os.fdopen(lock_fd, "a+", encoding="utf-8")
+    else:
+        lock_file_context = lock_path.open("r+", encoding="utf-8")
+
+    with lock_file_context as lock_file:
         deadline = time.monotonic() + max(1.0, timeout_seconds)
         while True:
             try:

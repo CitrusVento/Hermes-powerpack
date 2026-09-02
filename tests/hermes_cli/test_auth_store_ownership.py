@@ -3,6 +3,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+import pytest
+
 from hermes_cli import auth
 
 
@@ -64,7 +66,7 @@ def test_auth_store_lock_repairs_root_created_lock_owner_before_acquire(
 ) -> None:
     auth_path = tmp_path / "auth.json"
     lock_path = auth_path.with_suffix(".lock")
-    calls: list[tuple[str, tuple[int, int] | None]] = []
+    calls: list[tuple[int, int]] = []
 
     monkeypatch.setattr(
         auth,
@@ -72,18 +74,36 @@ def test_auth_store_lock_repairs_root_created_lock_owner_before_acquire(
         lambda path: (1001, 1001) if path == lock_path else None,
     )
     monkeypatch.setattr(
-        auth,
-        "_apply_auth_store_owner",
-        lambda path, owner_ids: calls.append((path.name, owner_ids)),
+        auth.os,
+        "fchown",
+        lambda fd, uid, gid: calls.append((uid, gid)),
     )
 
     @contextmanager
     def fake_file_lock(path, holder, timeout_seconds, timeout_message):
         assert path == lock_path
-        assert calls == [("auth.lock", (1001, 1001))]
+        assert lock_path.is_file()
+        assert calls == [(1001, 1001)]
         yield
 
     monkeypatch.setattr(auth, "_file_lock", fake_file_lock)
 
     with auth._auth_store_lock(target_path=auth_path):
         pass
+
+
+def test_auth_store_lock_does_not_follow_symlink(tmp_path, monkeypatch) -> None:
+    auth_path = tmp_path / "auth.json"
+    target = tmp_path / "unrelated"
+    target.write_text("do-not-touch", encoding="utf-8")
+    target.chmod(0o644)
+    auth_path.with_suffix(".lock").symlink_to(target)
+
+    monkeypatch.setattr(auth.os, "geteuid", lambda: 0)
+
+    with pytest.raises(OSError):
+        with auth._auth_store_lock(target_path=auth_path):
+            pass
+
+    assert target.read_text(encoding="utf-8") == "do-not-touch"
+    assert target.stat().st_mode & 0o777 == 0o644
